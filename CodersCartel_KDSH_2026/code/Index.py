@@ -376,22 +376,39 @@ Answer: [SUPPORTED or CONTRADICTED or NOT_MENTIONED]"""
     # Format for Mistral
     messages = [{"role": "user", "content": prompt}]
     formatted = tokenizer.apply_chat_template(
-        messages, 
-        tokenize=False, 
+        messages,
+        tokenize=False,
         add_generation_prompt=True
     )
-    
-    # Generate
-    inputs = tokenizer(formatted, return_tensors="pt").to(model.device)
-    
+
+    # Robust token placement for sharded / device-mapped models
+    try:
+        model_device = next(model.parameters()).device
+    except Exception:
+        model_device = torch.device("cpu")
+
+    # Debug prints to help diagnose hangs or slow CPU generation
+    print("DEBUG: model primary device:", model_device)
+    print("DEBUG: hf_device_map:", getattr(model, 'hf_device_map', None))
+    print("DEBUG: model.device attribute:", getattr(model, 'device', None))
+
+    inputs = tokenizer(formatted, return_tensors="pt")
+    # Move tensors to the device where model parameters live (works with sharded models)
+    inputs = {k: v.to(model_device) for k, v in inputs.items()}
+
+    model.eval()
     with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=150,
-            temperature=0.0,
-            do_sample=False,
-            pad_token_id=tokenizer.eos_token_id
-        )
+        try:
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=64,
+                temperature=0.0,
+                do_sample=False,
+                pad_token_id=tokenizer.eos_token_id
+            )
+        except Exception as e:
+            print("Generation error:", e)
+            return 'NOT_MENTIONED', str(e)
     
     response = tokenizer.decode(
         outputs[0][inputs['input_ids'].shape[1]:], 
@@ -413,6 +430,14 @@ print("\nLLM reasoning engine ready")
 
 # Test LLM
 # print("\n--- Testing LLM ---")
+print("DEBUG before LLM test: primary model device check")
+try:
+    print("DEBUG model primary device:", next(model.parameters()).device)
+except Exception:
+    print("DEBUG model has no parameters or cannot access primary device")
+print("DEBUG hf_device_map:", getattr(model, 'hf_device_map', None))
+print("DEBUG model.device attribute:", getattr(model, 'device', None))
+
 sample_verdict, sample_response = check_consistency_llm(
     sample['content'], 
     sample_evidence
